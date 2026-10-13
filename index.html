@@ -585,13 +585,24 @@ function popup(type, title, msg, cb){
 $(&quot;pBtn&quot;).onclick = () =&gt; { $(&quot;pop&quot;).classList.remove(&quot;show&quot;); if(afterClose) afterClose(); };
 
 function bad(el){ el.classList.add(&quot;bad&quot;); setTimeout(()=&gt;el.classList.remove(&quot;bad&quot;),600); el.focus(); }
+async function isEmailBanned(email){
+  const key = btoa(unescape(encodeURIComponent(String(email||&quot;&quot;).trim().toLowerCase()))).replace(/=/g,&quot;&quot;).replace(/\+/g,&quot;-&quot;).replace(/\//g,&quot;_&quot;);
+  const response = await fetch(&quot;https://aftabpubgfile-default-rtdb.firebaseio.com/bannedEmails/&quot;+key+&quot;.json&quot;, {cache:&quot;no-store&quot;});
+  if(!response.ok) throw new Error(&quot;Could not verify account status. Please try again.&quot;);
+  const record = await response.json();
+  return !!(record &amp;&amp; record.banned === true);
+}
 
-function doRegister(){
+async function doRegister(){
   const name = $(&quot;name&quot;).value.trim();
   const email = $(&quot;email&quot;).value.trim().toLowerCase();
 
   if(name.length &lt; 3){ bad($(&quot;name&quot;)); return popup(&quot;err&quot;,&quot;INVALID NAME&quot;,&quot;Please write your name (at least 3 characters).&quot;); }
   if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){ bad($(&quot;email&quot;)); return popup(&quot;err&quot;,&quot;INVALID EMAIL&quot;,&quot;Please write a valid email address.&quot;); }
+
+  try {
+    if(await isEmailBanned(email)) return popup(&quot;err&quot;,&quot;ACCOUNT BANNED&quot;,&quot;This email has been blocked by the administrator. You cannot register with this email.&quot;);
+  } catch(error) { return popup(&quot;err&quot;,&quot;CONNECTION ERROR&quot;,error.message || &quot;Could not verify account status. Please try again.&quot;); }
 
   const users = getUsers();
   if(users.some(u =&gt; u.name.toLowerCase() === name.toLowerCase())){
@@ -609,11 +620,14 @@ function doRegister(){
   popup(&quot;ok&quot;,&quot;REGISTRATION SUCCESSFUL!&quot;,&quot;Your account has been created successfully, &quot;+name+&quot;! Now click LOGIN and enter the same registered name and email to sign in.&quot;, () =&gt; { setMode(&quot;login&quot;); setTimeout(() =&gt; { $(&quot;name&quot;).value = name; $(&quot;email&quot;).value = email; }, 300); });
 }
 let mode = &quot;register&quot;;
-function doLogin(){
+async function doLogin(){
   const name = $(&quot;name&quot;).value.trim();
   const email = $(&quot;email&quot;).value.trim().toLowerCase();
   if(!name){ bad($(&quot;name&quot;)); return popup(&quot;err&quot;,&quot;NAME MISSING&quot;,&quot;Please write your name.&quot;); }
   if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){ bad($(&quot;email&quot;)); return popup(&quot;err&quot;,&quot;INVALID EMAIL&quot;,&quot;Please write a valid email address.&quot;); }
+  try {
+    if(await isEmailBanned(email)) return popup(&quot;err&quot;,&quot;ACCOUNT BANNED&quot;,&quot;This email has been blocked by the administrator. You cannot log in.&quot;);
+  } catch(error) { return popup(&quot;err&quot;,&quot;CONNECTION ERROR&quot;,error.message || &quot;Could not verify account status. Please try again.&quot;); }
   const u = getUsers().find(x =&gt; x.name.toLowerCase() === name.toLowerCase() &amp;&amp; x.email === email);
   if(!u){ bad($(&quot;name&quot;)); return popup(&quot;err&quot;,&quot;NOT REGISTERED&quot;,&quot;Kindly register your name and email first.&quot;); }
   try { localStorage.setItem(&quot;aftab_current&quot;, u.name); } catch(e){}
@@ -1103,10 +1117,20 @@ function enterApp(user){
   refreshBalance();
   showView("home");
 }
-window.addEventListener("message", e => {
+window.addEventListener("message", async e => {
   const f = document.getElementById("pageTwo");
   if(e.source !== f.contentWindow || !e.data) return;
-  if(e.data.type === "registered") enterApp({name:e.data.name, email:e.data.email, time:e.data.time});
+  if(e.data.type === "registered") {
+    try {
+      const email=String(e.data.email||"").trim().toLowerCase();
+      const key=btoa(unescape(encodeURIComponent(email))).replace(/=/g,"").replace(/\+/g,"-").replace(/\//g,"_");
+      const response=await fetch("https://aftabpubgfile-default-rtdb.firebaseio.com/bannedEmails/"+key+".json",{cache:"no-store"});
+      if(!response.ok) throw new Error("Could not verify account status.");
+      const ban=await response.json();
+      if(ban && ban.banned===true){ forceBanLogout(email); return; }
+      enterApp({name:e.data.name,email:email,time:e.data.time});
+    } catch(err) { document.getElementById("stage").classList.remove("page-two"); alert("Could not verify account status. Please check your connection and try again."); }
+  }
   if(e.data.type === "back") document.getElementById("stage").classList.remove("page-two");
 });
 
@@ -1118,6 +1142,34 @@ function aPopup(ok, title, msg, cb){
   aCb = cb || null; $$("aPop").classList.add("show");
 }
 function aClose(){ $$("aPop").classList.remove("show"); if(aCb){ const c=aCb; aCb=null; c(); } }
+
+// Live account-ban watcher: if the admin bans an active user's email, show an OK popup and log them out.
+let banPopupShown = false;
+async function forceBanLogout(email){
+  if(banPopupShown) return;
+  banPopupShown = true;
+  aPopup(false, "ACCOUNT BANNED", "Your account has been banned by the administrator. Press OK to log out.", () => {
+    me = {name:"", email:"", time:null}; balance = 0; premiumAccess = false;
+    const stageEl = document.getElementById("stage");
+    stageEl.classList.remove("page-app", "page-two");
+    const frame = document.getElementById("pageTwo");
+    try { frame.contentWindow.location.reload(); } catch(e) {}
+    banPopupShown = false;
+    stageEl.classList.add("page-two");
+  });
+}
+async function checkCurrentUserBan(){
+  if(!me || !me.email || banPopupShown || !document.getElementById("stage").classList.contains("page-app")) return;
+  try {
+    const email=String(me.email).trim().toLowerCase();
+    const key=btoa(unescape(encodeURIComponent(email))).replace(/=/g,"").replace(/\+/g,"-").replace(/\//g,"_");
+    const response=await fetch("https://aftabpubgfile-default-rtdb.firebaseio.com/bannedEmails/"+key+".json",{cache:"no-store"});
+    if(!response.ok) return;
+    const record=await response.json();
+    if(record && record.banned===true) forceBanLogout(email);
+  } catch(e) { /* retry on the next check */ }
+}
+setInterval(checkCurrentUserBan, 4000);
 function flag(el){ el.classList.add("bad"); setTimeout(()=>el.classList.remove("bad"),600); }
 
 $$("shot").addEventListener("change", () => {
